@@ -23,14 +23,14 @@
 //
 // How it is fast: the reference reads one character at a time and builds every
 // field by appending one character at a time. This reader instead works on
-// slices between delimiters, each found with one native scan. Every run of
-// lines up to the next quote or stray CR is taken whole: the run is split on
-// LF and then on ',' by native code. A record that does hold a quote or a
-// stray CR in its first line is read in plain runs: each run is the text up
-// to the next quote, CR or LF, split on ',' by native code, so its plain
-// fields come out whole; only a field that actually opens with a quote, or
-// the junk after one, is read field by field. Nothing is kept from one call
-// to the next.
+// slices between delimiters, each found with one native scan. Every record is
+// read in plain runs: each run is the text up to the next quote, CR or LF,
+// split on ',' by native code, so its plain fields come out whole; only a
+// field that actually opens with a quote, or the junk after one, is read
+// field by field. (An earlier version first probed for runs of clean lines
+// and split those whole; on the drawn sets the probe and the extra split
+// cost more than they saved, so the probe is gone.) Nothing is kept from
+// one call to the next.
 
 /** A field ends at a comma (the record goes on), at a line break, or at the end of the text. */
 const COMMA = 0;
@@ -59,9 +59,6 @@ export function run(input) {
   const DELIM = /[,\r\n]/g;
   // The next '"' , '\r' or '\n' at or after lastIndex, in one native scan.
   const PLAIN = /["\r\n]/g;
-  // The next true special: a '"' or a CR not followed by an LF, in one native scan.
-  const TRUE_SPECIAL = /"|\r(?!\n)/g;
-
   function error(code) {
     errors.push({ code, line: recordLine, row: recordRow });
   }
@@ -222,56 +219,11 @@ export function run(input) {
     }
     if (pos >= n) break;
 
-    // Batch path: every complete line up to the next true special (a quote, or
-    // a CR not followed by an LF) is a clean record: take the whole run of
-    // lines with two native splits. The line the special falls in, and any
-    // record after it, go through the paths below as before.
-    {
-      TRUE_SPECIAL.lastIndex = pos;
-      const m = TRUE_SPECIAL.exec(text);
-      const regionEnd = m === null ? n : m.index;
-      if (regionEnd > pos) {
-        let chunkEnd;
-        if (regionEnd === n) {
-          chunkEnd = n;
-        } else {
-          const lastNl = text.lastIndexOf('\n', regionEnd - 1);
-          chunkEnd = lastNl >= pos ? lastNl + 1 : pos;
-        }
-        if (chunkEnd > pos) {
-          const pieces = text.slice(pos, chunkEnd).split('\n');
-          // A chunk ending at an LF leaves a trailing '' in the split that is
-          // no line; at the end of the text the last piece is a line unless
-          // the text itself ends at an LF.
-          if (chunkEnd < n || text.charCodeAt(n - 1) === 10) pieces.pop();
-          pos = chunkEnd;
-          for (let i = 0; i < pieces.length; i++) {
-            const piece = pieces[i];
-            if (piece === '' || piece === '\r') {
-              line += 1;
-              continue;
-            }
-            recordLine = line;
-            recordRow = header && columns === null ? null : rows.length;
-            line += 1;
-            const flds = piece.split(',');
-            const lastF = flds[flds.length - 1];
-            if (lastF.charCodeAt(lastF.length - 1) === 13) flds[flds.length - 1] = lastF.slice(0, -1);
-            if (width >= 0 && flds.length === width) rows.push(flds);
-            else finishFields(flds);
-          }
-          continue;
-        }
-      }
-    }
-
     recordLine = line;
     recordRow = header && columns === null ? null : rows.length;
 
-    // The batch path above takes every record in a clean run of lines, so a
-    // record that reaches here holds a quote or a stray CR in its first line:
-    // read it in plain runs, each split on ',' by native code, with quoted
-    // fields read singly.
+    // Read the record in plain runs, each split on ',' by native code, with
+    // quoted fields read singly.
     {
       const fields = [];
       let cur = ''; // the field being built ('' while the next field has taken nothing yet)
