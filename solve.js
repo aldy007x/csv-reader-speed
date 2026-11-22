@@ -60,9 +60,29 @@ export function run(input) {
   const SPECIAL = /["\r]/g;
   // The next '"' , '\r' or '\n' at or after lastIndex, in one native scan.
   const PLAIN = /["\r\n]/g;
+  // The next true special: a '"' or a CR not followed by an LF, in one native scan.
+  const TRUE_SPECIAL = /"|\r(?!\n)/g;
 
   function error(code) {
     errors.push({ code, line: recordLine, row: recordRow });
+  }
+
+  // Takes one record's fields: the first record sets the width (and is the
+  // columns when a header is read); a later one is padded or cut to the width,
+  // with its short_row or long_row error, and appended to rows.
+  function finishFields(fields) {
+    if (width < 0) width = fields.length;
+    if (header && columns === null) {
+      columns = fields;
+      return;
+    }
+    if (fields.length < width) {
+      errors.push({ code: 'short_row', line: recordLine, row: recordRow, fields: fields.length });
+      while (fields.length < width) fields.push('');
+    } else if (fields.length > width) {
+      errors.push({ code: 'long_row', line: recordLine, row: recordRow, extra: fields.splice(width) });
+    }
+    rows.push(fields);
   }
 
   // Reads unquoted characters onto `value` up to the next comma or line break: a CR not
@@ -191,6 +211,46 @@ export function run(input) {
     }
     if (pos >= n) break;
 
+    // Batch path: every complete line up to the next true special (a quote, or
+    // a CR not followed by an LF) is a clean record: take the whole run of
+    // lines with two native splits. The line the special falls in, and any
+    // record after it, go through the paths below as before.
+    {
+      TRUE_SPECIAL.lastIndex = pos;
+      const m = TRUE_SPECIAL.exec(text);
+      const regionEnd = m === null ? n : m.index;
+      if (regionEnd > pos) {
+        let chunkEnd;
+        if (regionEnd === n) {
+          chunkEnd = n;
+        } else {
+          const lastNl = text.lastIndexOf('\n', regionEnd - 1);
+          chunkEnd = lastNl >= pos ? lastNl + 1 : pos;
+        }
+        if (chunkEnd > pos) {
+          const pieces = text.slice(pos, chunkEnd).split('\n');
+          // A chunk ending at an LF leaves a trailing '' in the split that is
+          // no line; at the end of the text the last piece is a line unless
+          // the text itself ends at an LF.
+          if (chunkEnd < n || text.charCodeAt(n - 1) === 10) pieces.pop();
+          pos = chunkEnd;
+          for (let i = 0; i < pieces.length; i++) {
+            let piece = pieces[i];
+            if (piece.charCodeAt(piece.length - 1) === 13) piece = piece.slice(0, -1);
+            if (piece === '') {
+              line += 1;
+              continue;
+            }
+            recordLine = line;
+            recordRow = header && columns === null ? null : rows.length;
+            line += 1;
+            finishFields(piece.split(','));
+          }
+          continue;
+        }
+      }
+    }
+
     recordLine = line;
     recordRow = header && columns === null ? null : rows.length;
 
@@ -301,18 +361,7 @@ export function run(input) {
       if (fields.length === 1 && fields[0] === '' && !quoted) continue;
     }
 
-    if (width < 0) width = fields.length;
-    if (header && columns === null) {
-      columns = fields;
-      continue;
-    }
-    if (fields.length < width) {
-      errors.push({ code: 'short_row', line: recordLine, row: recordRow, fields: fields.length });
-      while (fields.length < width) fields.push('');
-    } else if (fields.length > width) {
-      errors.push({ code: 'long_row', line: recordLine, row: recordRow, extra: fields.splice(width) });
-    }
-    rows.push(fields);
+    finishFields(fields);
   }
   return { columns: header ? (columns ?? []) : null, rows, errors };
 }
